@@ -29,6 +29,11 @@
 #include "voxblox_ros/ptcloud_vis.h"
 #include "voxblox_ros/transformer.h"
 
+#include "threadsafe/ThreadsafeQueue.hpp"
+#include "comm_msgs/pcl_transform.h"
+#include <geometry_msgs/Transform.h>
+#include <geometry_msgs/TransformStamped.h>
+
 namespace voxblox {
 
 constexpr float kDefaultMaxIntensity = 100.0;
@@ -61,6 +66,10 @@ class TsdfServer {
   virtual void newPoseCallback(const Transformation& /*new_pose*/) {
     // Do nothing.
   }
+
+  void insertTransformPointcloud(sensor_msgs::PointCloud2::Ptr& pointcloud, Transformation& T_W_C);
+  void insertPointcloudTransformWrapper(const comm_msgs::pcl_transformConstPtr& pointcloud_transform_msg);
+
 
   void publishAllUpdatedTsdfVoxels();
   void publishTsdfSurfacePoints();
@@ -117,6 +126,18 @@ class TsdfServer {
   /// Overwrites the layer with what's coming from the topic!
   void tsdfMapCallback(const voxblox_msgs::Layer& layer_msg);
 
+  // MULTI-VOXBLOX EDIT
+  // threadsafe queue for recieving pointclouds from multiple agents
+  typedef okvis::threadsafe::ThreadSafeQueue<sensor_msgs::PointCloud2::Ptr>
+          PclMsgQueue;
+  typedef std::shared_ptr<PclMsgQueue> PclMsgQueuePtr;
+
+  typedef okvis::threadsafe::ThreadSafeQueue<comm_msgs::pcl_transformConstPtr>
+          PclTransformMsgQueue;
+  typedef std::shared_ptr<PclTransformMsgQueue> PclTransformMsgQueuePtr;
+
+
+
  protected:
   /**
    * Gets the next pointcloud that has an available transform to process from
@@ -126,11 +147,15 @@ class TsdfServer {
       std::queue<sensor_msgs::PointCloud2::Ptr>* queue,
       sensor_msgs::PointCloud2::Ptr* pointcloud_msg, Transformation* T_G_C);
 
+
+  void PointcloudConsumerLoop();
+
   ros::NodeHandle nh_;
   ros::NodeHandle nh_private_;
 
   /// Data subscribers.
-  ros::Subscriber pointcloud_sub_;
+  std::vector<ros::Subscriber> pointcloud_sub_;
+  std::vector<ros::Subscriber> pointcloud_transform_sub_;
   ros::Subscriber freespace_pointcloud_sub_;
 
   /// Publish markers for visualization.
@@ -258,6 +283,16 @@ class TsdfServer {
 
   /// Current transform corrections from ICP.
   Transformation icp_corrected_transform_;
+
+  //MULTI_VOXBLOX EDITS
+  int num_agents_;
+  std::mutex insert_mutex_;
+  std::thread pointcloud_consumer_thread_;
+  PclMsgQueuePtr pointcloud_msgs_received_;
+  PclTransformMsgQueuePtr pointcloud_transform_msgs_received_;
+
+  int publish_skip_;
+
 };
 
 }  // namespace voxblox

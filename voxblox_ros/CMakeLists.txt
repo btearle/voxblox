@@ -18,6 +18,8 @@ cs_add_library(${PROJECT_NAME}
   src/tsdf_server.cc
 )
 
+include_directories("thirdparty/okvis")
+
 ############
 # BINARIES #
 ############
