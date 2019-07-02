@@ -37,8 +37,7 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
       accumulate_icp_corrections_(true),
       pointcloud_queue_size_(1),
       num_subscribers_tsdf_map_(0),
-      transformer_(nh, nh_private),
-      num_agents_(1) {
+      transformer_(nh, nh_private) {
   getServerConfigFromRosParam(nh_private);
 
   // Advertise topics.
@@ -56,31 +55,8 @@ TsdfServer::TsdfServer(const ros::NodeHandle& nh,
 
   nh_private_.param("pointcloud_queue_size", pointcloud_queue_size_,
                     pointcloud_queue_size_);
-  
-  // uint64_t tmp_num_agents;
-  nh_private_.param("num_agents", num_agents_, num_agents_);
-  // num_agents_ = tmp_num_agents;
-  pointcloud_sub_.reserve(num_agents_);
-  pointcloud_transform_sub_.reserve(num_agents_);
-  for (int i = 0; i < num_agents_; i++){
-      ros::Subscriber tmp_pointcloud_sub = nh_.subscribe(
-        "/pointcloud" + std::to_string(i), pointcloud_queue_size_,
-                                  &TsdfServer::insertPointcloudTransformWrapper, this);
-      pointcloud_sub_.push_back(tmp_pointcloud_sub);
-
-      ros::Subscriber tmp_pointcloud_transform_sub = nh_.subscribe(
-        "/pointcloud_transform" + std::to_string(i), pointcloud_queue_size_,
-                                  &TsdfServer::insertPointcloudTransformWrapper, this);
-      pointcloud_transform_sub_.push_back(tmp_pointcloud_transform_sub);
-  }
-  std::cout << "Num subs: " << pointcloud_sub_.size() << std::endl;
-
-  // create the threadsafe okvis pointcloud message queue
-  pointcloud_msgs_received_ = std::make_shared<PclMsgQueue>();
-  pointcloud_transform_msgs_received_ = std::make_shared<PclTransformMsgQueue>();
-
-  // initialize pcl consumer thread
-  pointcloud_consumer_thread_ = std::thread(&TsdfServer::PointcloudConsumerLoop, this);
+  pointcloud_sub_ = nh_.subscribe("pointcloud", pointcloud_queue_size_,
+                                  &TsdfServer::insertPointcloud, this);
 
   mesh_pub_ = nh_private_.advertise<voxblox_msgs::Mesh>("mesh", 1, true);
 
@@ -374,86 +350,6 @@ bool TsdfServer::getNextPointcloudFromQueue(
   return false;
 }
 
-// --------------- MULTI-VOXBLOX EDITS -----------------------------
-
-int pcl_received = 0;
-int pcl_counter = 0;
-void TsdfServer::insertPointcloudTransformWrapper(
-  const comm_msgs::pcl_transformConstPtr& pointcloud_transform_msg_in) {
-  pcl_received += 1;
-  std::cout << "Total PCLs received: " << pcl_received << std::endl;
-  pointcloud_transform_msgs_received_->PushNonBlocking(pointcloud_transform_msg_in);
-}
-
-void TsdfServer::PointcloudConsumerLoop() {
-  comm_msgs::pcl_transformConstPtr pointcloud_transform_msg;
-  for (;;) {
-    if (pointcloud_transform_msgs_received_->PopBlocking(&pointcloud_transform_msg)==false) {
-      return;
-    }
-    // const sensor_msgs::PointCloud2::Ptr pointcloud_msg_i;
-    std::cout << "Current MSG Queue size: " << pointcloud_transform_msgs_received_->Size() << std::endl;
-    // std::cout << "INSERT POINTCLOUD" << std::endl;
-
-    sensor_msgs::PointCloud2 pointcloud = pointcloud_transform_msg->fusedPointcloud;
-    sensor_msgs::PointCloud2::Ptr pointcloud_msg_ptr(&pointcloud);
-
-    geometry_msgs::Transform geo_transform_msg = pointcloud_transform_msg->worldTransform.transform;
-    
-    Transformation T_W_C;
-    tf::transformMsgToKindr(geo_transform_msg, &T_W_C);
-
-    insertTransformPointcloud(pointcloud_msg_ptr, T_W_C);
-    std::chrono::milliseconds dura(5);
-    std::this_thread::sleep_for(dura);
-  }
-}
-
-void TsdfServer::insertTransformPointcloud(
-    sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in, Transformation& T_W_C) {
-  // std::lock_guard<std::mutex> lock(insert_mutex_);
-
-  if (pointcloud_msg_in->header.stamp - last_msg_time_ptcloud_ >
-      min_time_between_msgs_) {
-    last_msg_time_ptcloud_ = pointcloud_msg_in->header.stamp;
-    // So we have to process the queue anyway... Push this back.
-    pointcloud_queue_.push(pointcloud_msg_in);
-  }
-
-  // std::cout << "Current PCL Queue size: " << pointcloud_queue_.size() << std::endl;
-  Transformation T_G_C = T_W_C;
-  sensor_msgs::PointCloud2::Ptr pointcloud_msg;
-  bool processed_any = false;
-  constexpr bool is_freespace_pointcloud = false;
-  auto start1 = std::chrono::steady_clock::now();
-  processPointCloudMessageAndInsert(pointcloud_msg_in, T_G_C,
-                                    is_freespace_pointcloud);
-  auto end1 = std::chrono::steady_clock::now();
-  
-  processed_any = true;
-  pcl_counter += 1;
-  std::cout << "Num clouds processed: " << pcl_counter << std::endl;
-
-  auto end = std::chrono::steady_clock::now();
-  if (!processed_any) {
-    return;
-  }
-
-  if (publish_pointclouds_on_update_) {
-    publishPointclouds();
-  }
-
-  if (verbose_) {
-    ROS_INFO_STREAM("Timings: " << std::endl << timing::Timing::Print());
-    ROS_INFO_STREAM(
-        "Layer memory: " << tsdf_map_->getTsdfLayer().getMemorySize());
-  }
-}
-
-// ----------------------------------------------------------------
-
-
-// Following not used in multi-agent set up
 void TsdfServer::insertPointcloud(
     const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in) {
   if (pointcloud_msg_in->header.stamp - last_msg_time_ptcloud_ >
